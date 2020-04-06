@@ -1,52 +1,34 @@
-#!/usr/bin/python
-
-"""A command-line radio setup script for radios with SiK software, like the RFD900 or 3DR."""
-# written to communicate with SiK version 2.6 (multipoint firmware)
-# written for use with Reach image v1.2
-# -which has python 2.7.3
-# -and pyserial module version 2.4
-
-current_version = "v0.0.9"
-######
-## changelog
-######
-# v0.0.9 updated help, add setting for SERIAL_SPEED, add check-parameters
-# v0.0.8 change --set-adr to --adr, add setting for NETID, ECC, MAVLINK, OP_RESEND
-# v0.0.7 add differentiation between remote and local radio, and add ability to set air data rate
-# v0.0.6 add function to test for correct baud rate
-# v0.0.5 add command line options
-# v0.0.4 add comments, check if serial port is open
-# v0.0.3 interacting with serial port
-# v0.0.2 back to basics.  write to port only
-# v0.0.1 copy/pasted a function to write to serial port and read back characters
-
+import sys
 
 import serial, time, re
+from serial.serialutil import SerialException
 from optparse import OptionParser
+from changelog import current_version
 
-######
+
 ## constants
-######
 serial_speeds = {2400: 2, 4800: 4, 9600: 9, 19200: 19, 38400: 38, 57600: 57, 115200: 115}
 air_speeds = (4, 8, 16, 24, 32, 64, 96, 128, 192, 250)
 netids = range(500)
 txpowers = range(1,31)
-default_serial_port = "/dev/ttyMFD2"
+default_serial_port = "/dev/ttyUSB0"  # "/dev/ttyMFD2"
+DEFAULT_BAUDRATE = 57600
+DEFAULT_SERIAL_SPEED = 57600
 
 ######
 ## command line options
 ######
-parser = OptionParser(usage="%prog [-p port_filepath] [-b baud]", version="%prog " + current_version)
-parser.add_option("-v", "--verbose", action="store_true", dest="verbose", help="Enables extra information output (debugging).", default="False")
+parser = OptionParser(usage="%prog serialport_options", version="%prog " + current_version)
 parser.add_option("-p", "--port", action="store", type="string", dest="port", help="Serial port filepath. Program default: %s" % default_serial_port, default=default_serial_port)
+parser.add_option("-v", "--verbose", action="store_true", dest="verbose", help="Enables extra information output (debugging).", default="False")
 parser.add_option("-t", "--test-baud", action="store_true", dest="test_baud", help="Test serial port for correct baud rate.", default=False)
 parser.add_option("-l", "--local", action="store_true", dest="local_radio", help="Work with the local radio. Program default. Can't be used simultaneously with remote option.", default=True)
 parser.add_option("-r", "--remote", action="store_false", dest="local_radio", help="Work with the remote radio.")
 parser.add_option("--show-parameters", action="store_true", dest="show_parameters", help="Shows all user settable EEPROM parameters.")
-parser.add_option("-b", "--baud", action="store", type="int", dest="baud", help="Choose our serial connection speed to the radio in baud.  Valid speeds: %s.  If no baud specified, it will test." % (serial_speeds.keys()) + " (factory default: 57600)", default="0")
-parser.add_option("--serial-speed", action="store", type="int", dest="serial_speed", help="Set the radio's serial speed in baud (SERIAL_SPEED).  Valid speeds: %s." % (serial_speeds.keys()) + " (factory default: 57600)", default="0")
-parser.add_option("--adr", action="store", type="int", dest="adr", help="Set the air data rate (AIR_SPEED) in kbps. Valid speeds: " + ', '.join(map(str, air_speeds)) + ". (factory default: 128)", default=None)
-parser.add_option("--netid", action="store", type="int", dest="netid", help="Set the network ID number (NETID).  Valid IDs: 0 to 499  (factory default: 25)",)
+parser.add_option("-b", "--baud", action="store", type="int", dest="baud", help="Choose our serial connection speed to the radio in baud.  Valid speeds: {}. If no baud specified, it will test. (factory default: {})".format(','.join(map(str, serial_speeds.keys())), DEFAULT_BAUDRATE), default=DEFAULT_BAUDRATE)
+parser.add_option("--serial-speed", action="store", type="int", dest="serial_speed", help="Set the radio's serial speed in baud (SERIAL_SPEED).  Valid speeds: {}. (factory default: {}).".format(','.join(map(str, serial_speeds.keys())), DEFAULT_SERIAL_SPEED))
+parser.add_option("--adr", action="store", type="int", dest="adr", help="Set the air data rate (AIR_SPEED) in kbps. Valid speeds: " + ', '.join(map(str, air_speeds)) + ". (factory default: 128)")
+parser.add_option("--netid", action="store", type="int", dest="netid", help="Set the network ID number (NETID).  Valid IDs: 0 to 499  (factory default: 25)")
 parser.add_option("--ecc-on", action="store_true", dest="ecc", help="Enable error correcting code (ECC).")
 parser.add_option("--ecc-off", action="store_false", dest="ecc", help="Disable error correcting code (ECC). (factory default)")
 parser.add_option("--mavlink-on", action="store_true", dest="mavlink", help="Enable MAVLink framing and reporting (MAVLINK).")
@@ -66,9 +48,8 @@ if options.verbose is True:
         # Print each argument separately so caller doesn't need to
         # stuff everything to be printed into a single string
         for arg in args:
-           print arg,
-        print
-else:   
+           print(arg)
+else:
     vprint = lambda *a: None      # a do-nothing function
 
 ######
@@ -77,11 +58,10 @@ else:
 
 def check_OK(response):
     """Checks for an "OK" response within a string."""
-    pattern = '\[[0-9]\]\sOK'
-    if re.search(pattern,response):
-        return True
-    else:
-        return False
+    ok = "OK" in response
+    if not ok:
+        vprint("OK not found in response: '{}'".format(response))
+    return ok
 
 ######
 ## this function gets a response from the serial port
@@ -90,18 +70,16 @@ def check_OK(response):
 def get_response():
     """Gets a response from the serial port."""
     sleep_time_after_buffer_read = 2
-    inBuffer = ser.inWaiting()
-    vprint("Characters in receive buffer before reading:", inBuffer)
-    response = ""
-    while inBuffer > 0:
-        vprint("Reading serial port buffer.")
-        response = response + ser.readline(inBuffer)
-        vprint("Response:", response)
+    #vprint("Characters in receive buffer before reading:", inBuffer)
+    response = b''
+    while ser.inWaiting():
+        # vprint("Reading serial port buffer.")
+        response += ser.readline()
+        # vprint("Response:", response.decode('utf-8', errors='ignore'))
         time.sleep(sleep_time_after_buffer_read)
-        inBuffer = ser.inWaiting()
-        vprint("Characters in receive buffer after reading and waiting %d seconds:" % sleep_time_after_buffer_read, ser.inWaiting())
-    vprint("No more characters in serial port buffer.")
-    return response
+        # vprint("Characters in receive buffer after reading and waiting %d seconds:" % sleep_time_after_buffer_read, ser.inWaiting())
+    # vprint("No more characters in serial port buffer.")
+    return response.decode('utf-8', errors='ignore')
 
 ######
 ## this function puts the radio in command mode
@@ -111,21 +89,20 @@ def command_mode():
     ser.flushOutput()
     ser.flushInput()
     time.sleep(1)           # give the flush a second
-    command = "\r\n"        # the ATO command must start on a newline
-    ser.write(command)
-    vprint("Sent command: (newline and carriage return)", command)
+    ser.write(b'"\r\n')  # the ATO command must start on a newline
+    vprint("Sent newline and carriage return")
     time.sleep(0.5)
     command = "ATO\r\n"     # exit AT command mode if we are in it
-    ser.write(command)      
-    vprint("Sent command:", command)
+    ser.write(command.encode('utf-8'))
+    vprint("Sent command: '{}'".format(command.strip()))
     time.sleep(1)
     command = "ATI\r\n"     # test to see if we are stuck in AT command mode.  If so, we see a response from this.
-    vprint("Sent command:", command)
-    time.sleep(2)           # minimum 1 second wait needed before +++
+    vprint("Sent command: '{}'".format(command.strip()))
+    time.sleep(1.5)           # minimum 1 second wait needed before +++
     command = "+++"         # +++ enters AT command mode
-    ser.write(command)
-    vprint("Sent command:", command)
-    time.sleep(5)           # minimum 1 second wait after +++
+    ser.write(command.encode('utf-8'))
+    vprint("Sent command: '{}'".format(command.strip()))
+    time.sleep(2)           # minimum 1 second wait after +++
     response = get_response()
     if check_OK(response):
         return True
@@ -143,9 +120,14 @@ def command_mode():
 ## this function tries to connect at each possible baud rate until it gets a sucessful response
 ######
 def test_baud():
-    for test_baud in reversed(serial_speeds.keys()):
+    for test_baud in sorted(serial_speeds.keys(), reverse=True):
+        print("testing baurate at {} ...".format(test_baud))
         ser.baudrate = test_baud
-        ser.open()
+        try:
+            ser.open()
+        except SerialException:
+            print("Couldn't open serial port {}".format(ser.port))
+            exit(1)
         vprint("Testing serial port at", test_baud, "baud.")
         if command_mode():
             vprint("Test passed at", test_baud, "baud.")
@@ -158,10 +140,14 @@ def test_baud():
 ######
 ## the main program
 ######
+if len(sys.argv) <= 1:  # print help if no argument
+    parser.print_help()
+    exit(1)
+
 ser = serial.Serial()   # ser is now a global variable
 ser.port = options.port
 ser.timeout = 0
-vprint("Serial port is:", ser.portstr)
+vprint("Serial port is {}".format(ser.port))
 
 # set for local or remote radio
 if options.local_radio is True:
@@ -173,18 +159,15 @@ else:
 if options.test_baud is True:
     baud = test_baud()
     ser.close()
-    print(baud)
+    print("Radio currently working at {} bauds".format(baud))
     exit(0)          # if test_baud was specified, then exit after test
 
-# was baudrate explicitly set?  if not, test for baudrate
-if options.baud == 0:
-    baud = test_baud()
+if options.baud in serial_speeds:
+    baud = options.baud
 else:
-    if options.baud in serial_speeds:
-        baud = options.baud
-    else:
-        vprint(options.baud, " baud is not a valid speed.")
-        exit(101)
+    vprint(options.baud, " baud is not a valid speed.")
+    exit(101)
+
 ser.baudrate = baud
 vprint("Serial port speed set to", baud, "baud.")
 
@@ -192,8 +175,12 @@ vprint("Serial port speed set to", baud, "baud.")
 vprint("Serial port settings:\n\t", ser)
 
 # open the serial port
-ser.open()
-vprint("Serial port", ser.portstr, "opened.")
+try:
+    ser.open()
+except SerialException:
+    print("Couldn't open serial port {}".format(ser.port))
+    exit(1)
+vprint("Serial port {} opened.".format(ser.portstr))
 
 # enter command mode
 command_mode()
@@ -233,26 +220,23 @@ if options.show_parameters is True:
     vprint("Getting parameters.")
     command = "%sI5\r\n" % command_prefix
     vprint("Sending command: ", command)
-    ser.write(command)
+    ser.write(command.encode('utf-8'))
     time.sleep(2)
     response = get_response()
     print(response)
     exit()
 
 
-######
 ##  1. set SERIAL_SPEED
-######
-
 if options.serial_speed != None:
-    if options.serial_speed in serial_speeds.keys():
+    if int(options.serial_speed) in serial_speeds.keys():
         vprint("Setting SERIAL SPEED to %d baud." % options.serial_speed)
         command = "%sS1=%d\r\n" % (command_prefix, serial_speeds[options.serial_speed])
         vprint("Sending command: ", command)
-        ser.write(command)
+        ser.write(command.encode('utf-8'))
         time.sleep(2)
         response = get_response()
-        if  not check_OK(response):
+        if not check_OK(response):
             vprint("Setting serial speed failed. Exiting.")
             exit(102)
     else:
@@ -268,7 +252,7 @@ if options.adr != None:
         vprint("Setting AIR DATA RATE to %dkbit/s." % options.adr)
         command = "%sS2=%d\r\n" % (command_prefix, options.adr)
         vprint("Sending command: ", command)
-        ser.write(command)
+        ser.write(command.encode('utf-8'))
         time.sleep(2)
         response = get_response()
         if  not check_OK(response):
@@ -286,7 +270,7 @@ if options.netid != None:
         vprint("Setting network ID (NETID) to %d." % options.netid)
         command = "%sS3=%d\r\n" % (command_prefix, options.netid)
         vprint("Sending command: ", command)
-        ser.write(command)
+        ser.write(command.encode('utf-8'))
         time.sleep(2)
         response = get_response()
         if  not check_OK(response):
@@ -307,7 +291,7 @@ if options.ecc != None:
         vprint("Enabling ECC")
         command = "%sS5=1\r\n" % (command_prefix)
         vprint("Sending command: ", command)
-        ser.write(command)
+        ser.write(command.encode('utf-8'))
         time.sleep(2)
         response = get_response()
         if  not check_OK(response):
@@ -317,7 +301,7 @@ if options.ecc != None:
         vprint("Disabling ECC")
         command = "%sS5=0\r\n" % (command_prefix)
         vprint("Sending command: ", command)
-        ser.write(command)
+        ser.write(command.encode('utf-8'))
         time.sleep(2)
         response = get_response()
         if  not check_OK(response):
@@ -332,7 +316,7 @@ if options.mavlink != None:
         vprint("Enabling MAVLINK")
         command = "%sS6=1\r\n" % (command_prefix)
         vprint("Sending command: ", command)
-        ser.write(command)
+        ser.write(command.encode('utf-8'))
         time.sleep(2)
         response = get_response()
         if  not check_OK(response):
@@ -342,7 +326,7 @@ if options.mavlink != None:
         vprint("Disabling MAVLINK")
         command = "%sS6=0\r\n" % (command_prefix)
         vprint("Sending command: ", command)
-        ser.write(command)
+        ser.write(command.encode('utf-8'))
         time.sleep(2)
         response = get_response()
         if  not check_OK(response):
@@ -358,7 +342,7 @@ if options.op_resend != None:
         vprint("Enabling OPPRESEND")
         command = "%sS7=1\r\n" % (command_prefix)
         vprint("Sending command: ", command)
-        ser.write(command)
+        ser.write(command.encode('utf-8'))
         time.sleep(2)
         response = get_response()
         if  not check_OK(response):
@@ -368,7 +352,7 @@ if options.op_resend != None:
         vprint("Disabling OPPRESEND")
         command = "%sS7=0\r\n" % (command_prefix)
         vprint("Sending command: ", command)
-        ser.write(command)
+        ser.write(command.encode('utf-8'))
         time.sleep(2)
         response = get_response()
         if  not check_OK(response):
@@ -390,15 +374,14 @@ if options.op_resend != None:
 # write to EEPROM and reboot
 command = "%s&W\r\n" % command_prefix
 vprint("Sending command: ", command)
-ser.write(command)
+ser.write(command.encode('utf-8'))
 time.sleep(2)
 response = get_response()
 check_OK(response)
 command = "%sZ\r\n" % command_prefix
 vprint("Sending command: ", command)
-ser.write(command)
+ser.write(command.encode('utf-8'))
 
 # close the serial port
 ser.close()
 vprint("Serial port", ser.portstr, "closed.")
-
